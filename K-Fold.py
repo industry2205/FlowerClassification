@@ -1,7 +1,6 @@
-# Efficient + DenseNet
+# Efficient
 !pip install -q efficientnet
 import efficientnet.tfkeras as efn
-from tensorflow.keras.applications import DenseNet201
 
 # Learning Rate Schedule
 LR_START = 0.0001
@@ -23,47 +22,57 @@ def lrfn(epoch):
     
 lr_callback = tf.keras.callbacks.LearningRateScheduler(lrfn, verbose=True)
 
-# DenseNet201
-with strategy.scope():
-    dn201 = tf.keras.applications.DenseNet201(weights='imagenet', include_top=False, input_shape=[*IMAGE_SIZE, 3])
-    dn201.trainable = True # Full Training
-    
-    model1 = tf.keras.Sequential([
-        dn201,
-        tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.Dense(len(CLASSES), activation='softmax')
-    ])
-
-model1.compile(
-    optimizer = 'adam',
-    loss = 'sparse_categorical_crossentropy',
-    metrics=['sparse_categorical_accuracy']
-)
-
-model1.fit(get_training_dataset(dataset), epochs=20, callbacks = [lr_callback])
-
 # EfficientNet07
-with strategy.scope():
-    enb7 = efn.EfficientNetB7(weights='noisy-student', include_top=False, input_shape=[*IMAGE_SIZE, 3])
-    enb7.trainable = True # Full Training
+def get_model():
+    with strategy.scope():
+        rnet = efn.EfficientNetB7(
+            input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3),
+            weights='noisy-student',
+            include_top=False
+        )
+        # trainable rnet
+        rnet.trainable = True
+        model = tf.keras.Sequential([
+            rnet,
+            tf.keras.layers.GlobalAveragePooling2D(),
+            tf.keras.layers.Dense(len(CLASSES), activation='softmax')
+        ])
+    model.compile(
+        optimizer='adam',
+        loss = 'sparse_categorical_crossentropy',
+        metrics=['sparse_categorical_accuracy']
+    )
+    return model
+
+# EfficientNet 교차검증
+def train_cross_validate(folds = 5):
+    histories = []
+    models = []
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor = 'val_loss', patience = 3)
+    kfold = KFold(folds, shuffle = True, random_state = SEED)
+    for f, (trn_ind, val_ind) in enumerate(kfold.split(TRAINING_FILENAMES)):
+        print(); print('#'*25)
+        print('### FOLD',f+1)
+        print('#'*25)
+        train_dataset = load_dataset(list(pd.DataFrame({'TRAINING_FILENAMES': TRAINING_FILENAMES}).loc[trn_ind]['TRAINING_FILENAMES']), labeled = True)
+        val_dataset = load_dataset(list(pd.DataFrame({'TRAINING_FILENAMES': TRAINING_FILENAMES}).loc[val_ind]['TRAINING_FILENAMES']), labeled = True, ordered = True)
+        model = get_model()
+        history = model.fit(
+            get_training_dataset(train_dataset), 
+            steps_per_epoch = STEPS_PER_EPOCH,
+            epochs = EPOCHS,
+            callbacks = [lr_callback],
+            validation_data = get_validation_dataset(val_dataset),
+            verbose=1
+        )
+        models.append(model)
+        histories.append(history)
+    return histories, models
+
+def train_and_predict(folds = 5):
+    test_ds = get_test_dataset(ordered=True)
+    test_images_ds = test_ds.map(lambda image, idnum: image)
+    histories, models = train_cross_validate(folds = folds)
+    probabilities = np.average([models[i].predict(test_images_ds) for i in range(folds)], axis = 0)
     
-    model2 = tf.keras.Sequential([
-        enb7,
-        tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.Dense(len(CLASSES), activation='softmax')
-    ])
-
-model2.compile(
-    optimizer = 'adam',
-    loss = 'sparse_categorical_crossentropy',
-    metrics=['sparse_categorical_accuracy']
-)
-model2.fit(get_training_dataset(dataset), epochs=20, callbacks = [lr_callback])
-
-# Ensemble
-model_weight = 0.42
-test_ds = get_test_dataset(ordered=True) # Test Set
-test_images_ds = test_ds.map(lambda image, idnum: image)
-
-probabilities = model1.predict(test_images_ds)*(1-model_weight) + model2.predict(test_images_ds)*model_weight
-
+histories, models = train_and_predict(folds = FOLDS)
