@@ -6,6 +6,10 @@ import tensorflow as tf, tensorflow.keras.backend as K
 from kaggle_datasets import KaggleDatasets
 
 
+#관련 내용 : https://www.tensorflow.org/guide/data_performance?hl=ko
+# https://www.tensorflow.org/tutorials/load_data/tfrecord?hl=ko
+# https://www.tensorflow.org/tutorials/distribute/multi_worker_with_keras
+
 # TPU 사용을 위해 확인
 try:
     tpu = tf.distribute.cluster_resolver.TPUClusterResolver()
@@ -22,7 +26,7 @@ else:
     strategy = tf.distribute.get_strategy() 
 
 # 훈련에 사용되는 HyperParameter 지정
-AUTO = tf.data.experimental.AUTOTUNE
+AUTO = tf.data.experimental.AUTOTUNE # Prefetch 사용 시 다음 Step을 훈련과정 중, 읽기 위해 사용
 IMAGE_SIZE = [512, 512]
 EPOCHS = 25
 BATCH_SIZE = 16 * strategy.num_replicas_in_sync
@@ -78,7 +82,9 @@ CLASSES = ['pink primrose',    'hard-leaved pocket orchid', 'canterbury bells', 
            'hippeastrum ',     'bee balm',                  'pink quill',       'foxglove',      'bougainvillea',     'camellia',             'mallow',                   'mexican petunia',  'bromelia',         'blanket flower',        # 90 - 99
            'trumpet creeper',  'blackberry lily',           'common tulip',     'wild rose'] 
 
-# Data Augmentation의 기능을 정의하는 함수(지정한 Matrix로 변환한다)
+
+# Data Augmentation의 기능을 정의하는 함수-----------------------------------------------------------
+# Rotation, Shear, Zoom, Shift의 기능을 랜덤으로 적용시키기 위해 사용 (3X3 Matrix 하나를 생성한다)
 def get_mat(rotation, shear, height_zoom, width_zoom, height_shift, width_shift):
 
     rotation = math.pi * rotation / 180.
@@ -120,20 +126,98 @@ def transform(image,label):
     # 위에서 지정된 함수를 저장
     m = get_mat(rot,shr,h_zoom,w_zoom,h_shift,w_shift) 
 
-    # LIST DESTINATION PIXEL INDICES
+    # 픽셀 index 저장
     x = tf.repeat( tf.range(DIM//2,-DIM//2,-1), DIM )
     y = tf.tile( tf.range(-DIM//2,DIM//2),[DIM] )
     z = tf.ones([DIM*DIM],dtype='int32')
     idx = tf.stack( [x,y,z] )
     
-    # ROTATE DESTINATION PIXELS ONTO ORIGIN PIXELS
+    # 위에서 저장된 index를 get_mat 함수에서 얻어지는 matrix로 위치 변환
     idx2 = K.dot(m,tf.cast(idx,dtype='float32'))
     idx2 = K.cast(idx2,dtype='int32')
     idx2 = K.clip(idx2,-DIM//2+XDIM+1,DIM//2)
     
-    # FIND ORIGIN PIXEL VALUES           
+    # image를 지정 index로 위치 변환
     idx3 = tf.stack( [DIM//2-idx2[0,], DIM//2-1+idx2[1,]] )
     d = tf.gather_nd(image,tf.transpose(idx3))
 
-    # 출력은 함수에서 정의한 Augmentation이 포함되어야 한다
     return tf.reshape(d,[DIM,DIM,3]),label
+
+# 이미지 반전 함수
+def data_augment(image, label):
+    # data augmentation. Thanks to the dataset.prefetch(AUTO) statement in the next function (below),
+    # this happens essentially for free on TPU. Data pipeline code is executed on the "CPU" part
+    # of the TPU while the TPU itself is computing gradients.
+    image = tf.image.random_flip_left_right(image)
+    return image, label   
+
+
+
+# TFRecord 파일 불러오기----------------------------------
+def decode_image(image_data):
+    image = tf.image.decode_jpeg(image_data, channels=3)
+    image = tf.cast(image, tf.float32) / 255.0 
+    # TPU 사용 시 Shape를 확실하게 지정해줌
+    image = tf.reshape(image, [*IMAGE_SIZE, 3])
+    return image
+
+# TFRecord에 저장된 Feature의 Format을 지정
+def read_labeled_tfrecord(example):
+    LABELED_TFREC_FORMAT = {
+        "image": tf.io.FixedLenFeature([], tf.string), # tf.string means bytestring
+        "class": tf.io.FixedLenFeature([], tf.int64),  # shape [] means single element
+    }
+    example = tf.io.parse_single_example(example, LABELED_TFREC_FORMAT)
+    image = decode_image(example['image'])
+    label = tf.cast(example['class'], tf.int32)
+    return image, label # returns a dataset of (image, label) pairs
+
+def read_unlabeled_tfrecord(example):
+    UNLABELED_TFREC_FORMAT = {
+        "image": tf.io.FixedLenFeature([], tf.string), # tf.string means bytestring
+        "id": tf.io.FixedLenFeature([], tf.string),  # shape [] means single element
+        # class is missing, this competitions's challenge is to predict flower classes for the test dataset
+    }
+    example = tf.io.parse_single_example(example, UNLABELED_TFREC_FORMAT)
+    image = decode_image(example['image'])
+    idnum = example['id']
+    return image, idnum # returns a dataset of image(s)
+
+# Shard : 데이터를 분산시킴
+# interleave : 데이터를 미리 읽음
+# interleave, shard를 사용하여 데이터 분산 적용
+def load_dataset(filenames, labeled = True, ordered = False):
+    # Read from TFRecords. For optimal performance, reading from multiple files at once and
+    # Diregarding data order. Order does not matter since we will be shuffling the data anyway
+    
+    ignore_order = tf.data.Options()
+    if not ordered:
+        ignore_order.experimental_deterministic = False # disable order, increase speed
+        
+    dataset = tf.data.TFRecordDataset(filenames, num_parallel_reads = AUTO) # automatically interleaves reads from multiple files
+    dataset = dataset.with_options(ignore_order) # use data as soon as it streams in, rather than in its original order
+    dataset = dataset.map(read_labeled_tfrecord if labeled else read_unlabeled_tfrecord, num_parallel_calls = AUTO) # returns a dataset of (image, label) pairs if labeled = True or (image, id) pair if labeld = False
+    return dataset
+
+# 정의된 함수를 사용하여 데이터셋 Read
+def get_training_dataset(dataset,do_aug=True):
+    dataset = load_dataset(TRAINING_FILENAMES, labeled=True)
+    dataset = dataset.map(data_augment, num_parallel_calls=AUTO)
+    if do_aug: dataset = dataset.map(transform, num_parallel_calls=AUTO)
+    dataset = dataset.repeat() # the training dataset must repeat for several epochs
+    dataset = dataset.shuffle(2048)
+    dataset = dataset.batch(BATCH_SIZE)
+    dataset = dataset.prefetch(AUTO) # prefetch next batch while training (autotune prefetch buffer size)
+    return dataset
+
+def get_validation_dataset(dataset):
+    dataset = dataset.batch(BATCH_SIZE)
+    dataset = dataset.cache()
+    dataset = dataset.prefetch(AUTO) # prefetch next batch while training (autotune prefetch buffer size)
+    return dataset
+
+def get_test_dataset(ordered=False):
+    dataset = load_dataset(TEST_FILENAMES, labeled=False, ordered=ordered)
+    dataset = dataset.batch(BATCH_SIZE)
+    dataset = dataset.prefetch(AUTO) # prefetch next batch while training (autotune prefetch buffer size)
+    return dataset
