@@ -4,7 +4,7 @@ import efficientnet.tfkeras as efn
 
 # Learning Rate Schedule
 LR_START = 0.0001
-LR_MAX = 0.00005 * strategy.num_replicas_in_sync
+LR_MAX = 0.0004
 LR_MIN = 0.000001
 LR_RAMPUP_EPOCHS = 4
 LR_SUSTAIN_EPOCHS = 6
@@ -45,6 +45,8 @@ def get_model():
     return model
 
 # EfficientNet 교차검증
+from sklearn.model_selection import KFold
+
 def train_cross_validate(folds = 5):
     histories = []
     models = []
