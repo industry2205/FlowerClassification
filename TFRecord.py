@@ -184,7 +184,7 @@ def read_unlabeled_tfrecord(example):
     return image, idnum # returns a dataset of image(s)
 
 # Shard : 데이터를 분산시킴
-# interleave : 데이터를 미리 읽음
+# interleave : 데이터 추출 병렬화
 # interleave, shard를 사용하여 데이터 분산 적용
 def load_dataset(filenames, labeled = True, ordered = False):
     # Read from TFRecords. For optimal performance, reading from multiple files at once and
