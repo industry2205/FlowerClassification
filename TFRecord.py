@@ -31,21 +31,6 @@ IMAGE_SIZE = [512, 512]
 EPOCHS = 25
 BATCH_SIZE = 16 * strategy.num_replicas_in_sync
 
-# mixed_precision 함수를 활용하여 float32를 float16으로 변경하여 속도를 높임
-MIXED_PRECISION = False
-XLA_ACCELERATE = False
-
-if MIXED_PRECISION:
-    from tensorflow.keras.mixed_precision import experimental as mixed_precision
-    if tpu: policy = tf.keras.mixed_precision.experimental.Policy('mixed_bfloat16')
-    else: policy = tf.keras.mixed_precision.experimental.Policy('mixed_float16')
-    mixed_precision.set_policy(policy)
-    print('Mixed precision enabled')
-
-if XLA_ACCELERATE:
-    tf.config.optimizer.set_jit(True)
-    print('Accelerated Linear Algebra enabled')
-
 # 제공받은 데이터 경로를 불러옴
 GCS_DS_PATH = KaggleDatasets().get_gcs_path('flower-classification-with-tpus')
 
