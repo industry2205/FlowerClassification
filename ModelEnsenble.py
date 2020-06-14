@@ -20,6 +20,16 @@ def lrfn(epoch):
     lr = (LR_MAX - LR_MIN) * LR_EXP_DECAY**(epoch - LR_RAMPUP_EPOCHS - LR_SUSTAIN_EPOCHS) + LR_MIN
 
     return lr
+
+# Learning Rate Change Schedule (환경적 요인(TPU 3시간 사용) 때문에 Model 이전시킨 후 적용)
+LR_START = 0.0001
+LR_MAX = 0.000001
+LR_MIN = 0.0000005
+LR_EXP_DECAY = .8
+
+def lrfn(epoch):
+    lr = (LR_MAX - LR_MIN) * LR_EXP_DECAY**(epoch) + LR_MIN
+    return lr
     
 lr_callback = tf.keras.callbacks.LearningRateScheduler(lrfn, verbose=True)
 
@@ -61,7 +71,7 @@ model2.compile(
 model2.fit(get_training_dataset(dataset), epochs=20, callbacks = [lr_callback])
 
 # Ensemble
-model_weight = 0.42
+model_weight = 0.5
 test_ds = get_test_dataset(ordered=True) # Test Set
 test_images_ds = test_ds.map(lambda image, idnum: image)
 
