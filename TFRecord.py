@@ -10,13 +10,6 @@ from kaggle_datasets import KaggleDatasets
 # https://www.tensorflow.org/tutorials/load_data/tfrecord?hl=ko
 # https://www.tensorflow.org/tutorials/distribute/multi_worker_with_keras
 
-# TPU 사용을 위해 확인
-try:
-    tpu = tf.distribute.cluster_resolver.TPUClusterResolver()
-    print('Running on TPU ', tpu.master())
-except ValueError:
-    tpu = None
-
 # Hardware를 확인하여 TPU 인스턴스를 생성
 if tpu:
     tf.config.experimental_connect_to_cluster(tpu)
@@ -168,9 +161,7 @@ def read_unlabeled_tfrecord(example):
     idnum = example['id']
     return image, idnum # returns a dataset of image(s)
 
-# Shard : 데이터를 분산시킴
 # interleave : 데이터 추출 병렬화
-# interleave, shard를 사용하여 데이터 분산 적용
 def load_dataset(filenames, labeled = True, ordered = False):
     # Read from TFRecords. For optimal performance, reading from multiple files at once and
     # Diregarding data order. Order does not matter since we will be shuffling the data anyway
